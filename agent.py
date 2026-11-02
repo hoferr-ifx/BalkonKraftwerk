@@ -20,9 +20,13 @@ from anker_solix_api.api import AnkerSolixApi
 from anker_solix_api.errors import AnkerSolixError
 from shelly import ShellyPro2PM
 
-POLL_INTERVAL_SECONDS = 60
-DEVICE_DETAILS_INTERVAL_SECONDS = 15 * 60
-SOLARBANK_PRO_MODEL = "A17C1"
+SHELLY_CHANNEL                      = 1                 # channel where SHELLY is connected
+SHELLY_HOST                         = "192.168.1.9"     # SHELLY host IP address
+
+BATTERY_LEVEL_FOR_HOME_OUTPUT       = 7                # battery level threshold in percent for home output 
+POLL_INTERVAL_SECONDS               = 60
+DEVICE_DETAILS_INTERVAL_SECONDS     = 15 * 60
+SOLARBANK_PRO_MODEL                 = "A17C1"
 
 console = Console()
 logger = logging.getLogger("solarbank-agent")
@@ -176,17 +180,36 @@ def collect_readings(
 
 
 def _format_power(value: float | None) -> str:
-    return "Nicht verfügbar" if value is None else f"{value:,.0f} W"
+    return "Not available" if value is None else f"{value:,.0f} W"
 
 
 def _format_soc(value: float | None) -> str:
-    return "Nicht verfügbar" if value is None else f"{value:.0f} %"
+    return "Not available" if value is None else f"{value:.0f} %"
 
 
-def read_shelly(shelly: ShellyPro2PM) -> list[ShellyChannelReading]:
+def control_shelly(shelly: ShellyPro2PM) -> list[ShellyChannelReading]:
     readings: list[ShellyChannelReading] = []
     for channel in (0, 1):
+        status_changed = False
         status = shelly.get_channel_status(channel)
+
+        # check if change of state necessary
+        if SHELLY_CHANNEL == channel:
+            if not bool(status["is_on"]):
+                # Boiler has no power
+                logger.info("Shelly switch state changed to ON.")
+                status_changed = True
+                shelly.set_switch(channel, True)
+            else:
+                # Boiler has power
+                logger.info("Shelly switch state changed to OFF.")
+                status_changed = True
+                shelly.set_switch(channel, False)
+
+            if status_changed:
+                status = shelly.get_channel_status(channel)
+
+        # update info
         readings.append(
             ShellyChannelReading(
                 channel=channel,
@@ -198,6 +221,7 @@ def read_shelly(shelly: ShellyPro2PM) -> list[ShellyChannelReading]:
                 temp_c=float(status["temp_c"]),
             )
         )
+
     return readings
 
 
@@ -214,15 +238,19 @@ def make_shelly_table(
     table.add_column("Temperature")
 
     if channels:
+        color = "grey50"
         for channel in channels:
+            if SHELLY_CHANNEL == channel.channel:
+                color = "green" if channel.is_on else "red"
+
             table.add_row(
-                str(channel.channel),
-                "[green]ON[/green]" if channel.is_on else "[red]OFF[/red]",
-                _format_power(channel.power_w),
-                f"{channel.voltage_v:.1f} V",
-                f"{channel.current_a:.2f} A",
-                f"{channel.total_kwh:.2f} kWh",
-                f"{channel.temp_c:.1f} °C",
+                f"[{color}]{str(channel.channel)}[/{color}]",
+                f"[{color}]{'ON' if channel.is_on else 'OFF'}[/{color}]",
+                f"[{color}]{_format_power(channel.power_w)}[/{color}]",
+                f"[{color}]{channel.voltage_v:.1f} V[/{color}]",
+                f"[{color}]{channel.current_a:.2f} A[/{color}]",
+                f"[{color}]{channel.total_kwh:.2f} kWh[/{color}]",
+                f"[{color}]{channel.temp_c:.1f} °C[/{color}]",
             )
     else:
         table.add_row(
@@ -253,12 +281,17 @@ def make_dashboard(
 
     if readings:
         for reading in readings:
+            if (reading.home_output is not None) and (reading.home_output > 0):
+                color = "green"
+            else:
+                color = "red"
+
             table.add_row(
-                _format_soc(reading.soc),
-                _format_power(reading.solar_power),
-                _format_power(reading.home_output),
-                _format_power(reading.grid_import),
-                _format_power(reading.grid_export),
+                f"[{color}]{_format_soc(reading.soc)}[/{color}]",
+                f"[{color}]{_format_power(reading.solar_power)}[/{color}]",
+                f"[{color}]{_format_power(reading.home_output)}[/{color}]",
+                f"[{color}]{_format_power(reading.grid_import)}[/{color}]",
+                f"[{color}]{_format_power(reading.grid_export)}[/{color}]",
             )
     else:
         table.add_row(
@@ -297,7 +330,7 @@ async def run_agent() -> None:
             "ANKER_USER and ANKER_PASSWORD must be set in the .env file."
         )
     shelly = ShellyPro2PM(
-        ip=os.getenv("SHELLY_HOST", "192.168.1.9"),
+        ip=os.getenv("SHELLY_HOST", SHELLY_HOST),
         password=os.getenv("SHELLY_PASSWORD") or None,
     )
 
@@ -350,7 +383,7 @@ async def run_agent() -> None:
 
                 try:
                     # the Shelly client is blocking, keep it off the event loop
-                    shelly_channels = await asyncio.to_thread(read_shelly, shelly)
+                    shelly_channels = await asyncio.to_thread(control_shelly, shelly)
                     shelly_error = None
                 except (RequestException, KeyError, ValueError) as error:
                     shelly_error = f"{type(error).__name__}: {error}"
