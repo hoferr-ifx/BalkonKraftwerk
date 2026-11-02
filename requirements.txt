@@ -1,0 +1,5 @@
+anker-solix-api @ git+https://github.com/thomluther/anker-solix-api.git@646e2b7bc314321527e7ec41070367154e001a3c
+aiohttp
+python-dotenv
+rich
+requests
